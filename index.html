@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC with MQTT Example</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script src="adapter.js"></script>
+</head>
+
+<body>
+    <h1>WebRTC Test</h1>
+    <!-- Start button -->
+    <button id="startButton">Start</button>
+    <button id="sendOfferButton">Send Offer</button>
+    <button id="answerButton">Answer</button>
+    <button id="sendCandidateButton">Send Candidate</button>
+
+    <div id="status">Status: Waiting for connection...</div>
+
+    <script>
+        let candidates = [];
+        let offer = null;
+        const topicOffer = 'offer';
+        const topicAnswer = 'answer';
+        const topicCandidate = 'candidate';
+
+        // Generate a unique client ID when the page loads
+        const clientId = 'client_' + Date.now();  // Simple unique ID based on timestamp
+
+        // MQTT Configuration
+        const brokerUrl = 'wss://22f036df50984390b36ae0d50c4bcf9d.s1.eu.hivemq.cloud:8884/mqtt';
+        const username = 'pelectrome';
+        const password = 'Snb19951717';
+
+        // Connect to the broker
+        const client = mqtt.connect(brokerUrl, {
+            username: username,
+            password: password
+        });
+
+        const peerConnectionConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }  // Google's STUN server
+            ]
+        };
+
+        let localStream;
+        let peerConnection;
+        let dataChannel;
+
+        // Create a peer connection
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(peerConnectionConfig);
+
+            // ICE candidate handler
+            peerConnection.onicecandidate = function (event) {
+                if (event.candidate) {
+                    candidates.push(event.candidate);
+                }
+            };
+
+            // Add the video and audio tracks from the local stream
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            // Listen for ICE connection state changes
+            peerConnection.oniceconnectionstatechange = function () {
+                console.log("ICE connection state: ", peerConnection.iceConnectionState);
+            };
+
+            // Listen for remote stream
+            peerConnection.ontrack = function (event) {
+                console.log('Remote track received');
+                const remoteVideo = document.getElementById('remote-video');
+                remoteVideo.srcObject = event.streams[0];
+            };
+        }
+
+        // Start the connection by creating an offer if sender is checked
+        function startConnection() {
+            navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                .then(stream => {
+                    localStream = stream;
+                    const localVideo = document.getElementById('local-video');
+                    localVideo.srcObject = stream;
+                    localVideo.muted = true; // Mute the audio output
+                    createPeerConnection();
+                })
+                .catch(error => console.log('Error getting media: ', error));
+        }
+
+        // Send Offer via MQTT
+        function sendOffer(offer) {
+            console.log('Sending offer');
+            const message = {
+                id: clientId,  // Include the client ID
+                offer: offer
+            };
+            client.publish(topicOffer, JSON.stringify(message));
+        }
+
+        // Send Answer via MQTT
+        function sendAnswer(answer) {
+            const message = {
+                id: clientId,  // Include the client ID
+                answer: answer
+            };
+            client.publish(topicAnswer, JSON.stringify(message));
+        }
+
+        // Send ICE Candidate via MQTT
+        function sendCandidate(candidate) {
+            console.log('Sending ICE candidate');
+            const message = {
+                id: clientId,  // Include the client ID
+                candidate: candidate
+            };
+            client.publish(topicCandidate, JSON.stringify(message));
+        }
+
+        // MQTT Subscription to receive messages
+        client.on('connect', () => {
+            console.log('Connected to MQTT broker');
+            client.subscribe(topicOffer, (err) => {
+                if (err) {
+                    console.log('Subscription error: ', err);
+                } else {
+                    console.log('Subscribed to topic: ', topicOffer);
+                }
+            });
+
+            client.subscribe(topicAnswer, (err) => {
+                if (err) {
+                    console.log('Subscription error: ', err);
+                } else {
+                    console.log('Subscribed to topic: ', topicAnswer);
+                }
+            });
+
+            client.subscribe(topicCandidate, (err) => {
+                if (err) {
+                    console.log('Subscription error: ', err);
+                } else {
+                    console.log('Subscribed to topic: ', topicCandidate);
+                }
+            });
+        });
+
+        // Handle incoming MQTT messages
+        client.on('message', (topic, message) => {
+            const msg = JSON.parse(message.toString());
+
+            // Check if the message is from this client; ignore if it is
+            if (msg.id === clientId) {
+                console.log('Ignoring own message');
+                return;
+            }
+
+            switch (topic) {
+                case topicOffer:
+                    console.log('Received offer');
+                    offer = msg.offer;
+                    break;
+                case topicAnswer:
+                    console.log('Received answer');
+                    peerConnection.setRemoteDescription(new RTCSessionDescription(msg.answer))
+                        .catch(error => console.log('Error handling answer: ', error));
+                    break;
+                case topicCandidate:
+                    console.log('Received ICE candidate');
+                    peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate))
+                        .catch(error => console.log('Error adding ICE candidate: ', error));
+                    break;
+                default:
+                    console.log('Unknown topic:', topic);
+            }
+        });
+
+        document.getElementById('sendOfferButton').addEventListener('click', () => {
+            // Create an offer if sender is selected
+            peerConnection.createOffer()
+                .then(offer => {
+                    return peerConnection.setLocalDescription(offer);
+                })
+                .then(() => {
+                    sendOffer(peerConnection.localDescription);
+                })
+                .catch(error => console.log('Error creating offer: ', error));
+        });
+
+        document.getElementById('startButton').addEventListener('click', () => {
+            startConnection();
+        });
+
+        document.getElementById('sendCandidateButton').addEventListener('click', () => {
+            if (candidates.length > 0) {
+                let i = 0;
+                console.log('Sending ICE candidates');
+                candidates.forEach(candidate => {
+                    sendCandidate(candidate);
+                    i++;
+                });
+                candidates = [];
+                console.log('Sent ' + i + ' ICE candidates');
+            }
+        });
+
+        document.getElementById('answerButton').addEventListener('click', () => {
+            // Create an answer if receiver is selected
+            peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+                .then(() => peerConnection.createAnswer())
+                .then(answer => {
+                    return peerConnection.setLocalDescription(answer);
+                })
+                .then(() => {
+                    sendAnswer(peerConnection.localDescription);
+                })
+                .catch(error => console.log('Error handling offer: ', error));
+        });
+    </script>
+
+    <video id="local-video" autoplay></video> <!-- For showing local video -->
+    <video id="remote-video" autoplay></video> <!-- For showing remote video -->
+</body>
+
+</html>
